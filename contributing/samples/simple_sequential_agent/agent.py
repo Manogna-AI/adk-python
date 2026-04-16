@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -88,7 +88,7 @@ prime_agent = LlmAgent(
 )
 
 root_agent = SequentialAgent(
-    name="code_pipeline_agent",
+    name="simple_sequential_agent",
     sub_agents=[roll_agent, prime_agent],
     # The agents will run in the order provided: roll_agent -> prime_agent
 )

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
-from google.genai.types import Schema, Type
+from __future__ import annotations
+
+from typing import Any
+from typing import Dict
+
+from google.genai.types import Schema
+from google.genai.types import Type
 import mcp.types as mcp_types
+
 from ..base_tool import BaseTool
 
 
@@ -39,8 +45,14 @@ def adk_to_mcp_tool_type(tool: BaseTool) -> mcp_types.Tool:
   tool_declaration = tool._get_declaration()
   if not tool_declaration:
     input_schema = {}
+  elif tool_declaration.parameters_json_schema:
+    # Use JSON schema directly if available
+    input_schema = tool_declaration.parameters_json_schema
+  elif tool_declaration.parameters:
+    # Convert from Schema object
+    input_schema = gemini_to_json_schema(tool_declaration.parameters)
   else:
-    input_schema = gemini_to_json_schema(tool._get_declaration().parameters)
+    input_schema = {}
   return mcp_types.Tool(
       name=tool.name,
       description=tool.description,

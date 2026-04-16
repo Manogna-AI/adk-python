@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from google.adk.agents import Agent
+from google.adk.agents.llm_agent import Agent
 from google.adk.flows.llm_flows import identity
-from google.adk.models import LlmRequest
+from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 import pytest
 
-from ... import utils
+from ... import testing_utils
 
 
 @pytest.mark.asyncio
@@ -28,7 +28,9 @@ async def test_no_description():
       config=types.GenerateContentConfig(system_instruction=""),
   )
   agent = Agent(model="gemini-1.5-flash", name="agent")
-  invocation_context = await utils.create_invocation_context(agent=agent)
+  invocation_context = await testing_utils.create_invocation_context(
+      agent=agent
+  )
 
   async for _ in identity.request_processor.run_async(
       invocation_context,
@@ -52,7 +54,9 @@ async def test_with_description():
       name="agent",
       description="test description",
   )
-  invocation_context = await utils.create_invocation_context(agent=agent)
+  invocation_context = await testing_utils.create_invocation_context(
+      agent=agent
+  )
 
   async for _ in identity.request_processor.run_async(
       invocation_context,
@@ -60,7 +64,8 @@ async def test_with_description():
   ):
     pass
 
-  assert request.config.system_instruction == "\n\n".join([
-      'You are an agent. Your internal name is "agent".',
-      ' The description about you is "test description"',
-  ])
+  assert (
+      request.config.system_instruction
+      == """\
+You are an agent. Your internal name is "agent". The description about you is "test description"."""
+  )

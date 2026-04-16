@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 from pytest import mark
 
-from ..unittests.utils import simplify_events
+from ..unittests.testing_utils import simplify_events
 from .fixture import callback_agent
 from .utils import assert_agent_says
 from .utils import TestRunner

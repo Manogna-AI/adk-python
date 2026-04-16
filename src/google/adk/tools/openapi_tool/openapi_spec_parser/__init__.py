@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .openapi_spec_parser import OpenApiSpecParser, OperationEndpoint, ParsedOperation
+from .openapi_spec_parser import OpenApiSpecParser
+from .openapi_spec_parser import OperationEndpoint
+from .openapi_spec_parser import ParsedOperation
 from .openapi_toolset import OpenAPIToolset
 from .operation_parser import OperationParser
-from .rest_api_tool import AuthPreparationState, RestApiTool, snake_to_lower_camel, to_gemini_schema
+from .rest_api_tool import AuthPreparationState
+from .rest_api_tool import RestApiTool
+from .rest_api_tool import snake_to_lower_camel
 from .tool_auth_handler import ToolAuthHandler
 
 __all__ = [
@@ -25,7 +29,6 @@ __all__ = [
     'OpenAPIToolset',
     'OperationParser',
     'RestApiTool',
-    'to_gemini_schema',
     'snake_to_lower_camel',
     'AuthPreparationState',
     'ToolAuthHandler',

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ from typing import List
 from typing import Optional
 from unittest import mock
 
-from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.llm_agent import Agent
 from google.adk.events.event import Event
 from google.adk.flows.llm_flows.functions import handle_function_calls_async
 from google.adk.tools.function_tool import FunctionTool
@@ -29,7 +29,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 import pytest
 
-from ... import utils
+from ... import testing_utils
 
 
 class CallbackType(Enum):
@@ -73,7 +73,7 @@ async def invoke_tool_with_callbacks(
     return {"initial": "response"}
 
   tool = FunctionTool(simple_fn)
-  model = utils.MockModel.create(responses=[])
+  model = testing_utils.MockModel.create(responses=[])
   agent = Agent(
       name="agent",
       model=model,
@@ -81,7 +81,7 @@ async def invoke_tool_with_callbacks(
       before_tool_callback=before_cb,
       after_tool_callback=after_cb,
   )
-  invocation_context = await utils.create_invocation_context(
+  invocation_context = await testing_utils.create_invocation_context(
       agent=agent, user_content=""
   )
   # Build function call event

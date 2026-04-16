@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import keyword
-import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
 from fastapi.openapi.models import Response
 from fastapi.openapi.models import Schema
@@ -22,47 +27,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import model_serializer
 
-
-def to_snake_case(text: str) -> str:
-  """Converts a string into snake_case.
-
-  Handles lowerCamelCase, UpperCamelCase, or space-separated case, acronyms
-  (e.g., "REST API") and consecutive uppercase letters correctly.  Also handles
-  mixed cases with and without spaces.
-
-  Examples:
-  ```
-  to_snake_case('camelCase') -> 'camel_case'
-  to_snake_case('UpperCamelCase') -> 'upper_camel_case'
-  to_snake_case('space separated') -> 'space_separated'
-  ```
-
-  Args:
-      text: The input string.
-
-  Returns:
-      The snake_case version of the string.
-  """
-
-  # Handle spaces and non-alphanumeric characters (replace with underscores)
-  text = re.sub(r'[^a-zA-Z0-9]+', '_', text)
-
-  # Insert underscores before uppercase letters (handling both CamelCases)
-  text = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', text)  # lowerCamelCase
-  text = re.sub(
-      r'([A-Z]+)([A-Z][a-z])', r'\1_\2', text
-  )  # UpperCamelCase and acronyms
-
-  # Convert to lowercase
-  text = text.lower()
-
-  # Remove consecutive underscores (clean up extra underscores)
-  text = re.sub(r'_+', '_', text)
-
-  # Remove leading and trailing underscores
-  text = text.strip('_')
-
-  return text
+from ..._gemini_schema_util import _to_snake_case
 
 
 def rename_python_keywords(s: str, prefix: str = 'param_') -> str:
@@ -99,11 +64,9 @@ class ApiParameter(BaseModel):
   required: bool = False
 
   def model_post_init(self, _: Any):
-    self.py_name = (
-        self.py_name
-        if self.py_name
-        else rename_python_keywords(to_snake_case(self.original_name))
-    )
+    if not self.py_name:
+      inferred_name = rename_python_keywords(_to_snake_case(self.original_name))
+      self.py_name = inferred_name or self._default_py_name()
     if isinstance(self.param_schema, str):
       self.param_schema = Schema.model_validate_json(self.param_schema)
 
@@ -111,6 +74,16 @@ class ApiParameter(BaseModel):
     self.type_value = TypeHintHelper.get_type_value(self.param_schema)
     self.type_hint = TypeHintHelper.get_type_hint(self.param_schema)
     return self
+
+  def _default_py_name(self) -> str:
+    location_defaults = {
+        'body': 'body',
+        'query': 'query_param',
+        'path': 'path_param',
+        'header': 'header_param',
+        'cookie': 'cookie_param',
+    }
+    return location_defaults.get(self.param_location or '', 'value')
 
   @model_serializer
   def _serialize(self):

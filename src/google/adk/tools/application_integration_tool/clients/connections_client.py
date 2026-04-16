@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 import google.auth
 from google.auth import default as default_service_credential
@@ -248,6 +254,12 @@ class ConnectionsClient:
                         "Timeout in seconds for execution of custom query"
                     ),
                 },
+                "sortByColumns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Column to sort the results by",
+                },
                 "connectorOutputPayload": {"type": "object"},
                 "nextPageToken": {"type": "string"},
                 "execute-connector_Response": {
@@ -312,7 +324,9 @@ class ConnectionsClient:
                 "content": {
                     "application/json": {
                         "schema": {
-                            "$ref": f"#/components/schemas/{action_display_name}_Request"
+                            "$ref": (
+                                f"#/components/schemas/{action_display_name}_Request"
+                            )
                         }
                     }
                 }
@@ -323,7 +337,9 @@ class ConnectionsClient:
                     "content": {
                         "application/json": {
                             "schema": {
-                                "$ref": f"#/components/schemas/{action_display_name}_Response",
+                                "$ref": (
+                                    f"#/components/schemas/{action_display_name}_Response"
+                                ),
                             }
                         }
                     },
@@ -342,9 +358,11 @@ class ConnectionsClient:
     return {
         "post": {
             "summary": f"List {entity}",
-            "description": f"""Returns the list of {entity} data. If the page token was available in the response, let users know there are more records available. Ask if the user wants to fetch the next page of results. When passing filter use the
+            "description": (
+                f"""Returns the list of {entity} data. If the page token was available in the response, let users know there are more records available. Ask if the user wants to fetch the next page of results. When passing filter use the
                 following format: `field_name1='value1' AND field_name2='value2'
-                `. {tool_instructions}""",
+                `. {tool_instructions}"""
+            ),
             "x-operation": "LIST_ENTITIES",
             "x-entity": f"{entity}",
             "operationId": f"{tool_name}_list_{entity}",
@@ -369,7 +387,9 @@ class ConnectionsClient:
                                     f"Returns a list of {entity} of json"
                                     f" schema: {schema_as_string}"
                                 ),
-                                "$ref": "#/components/schemas/execute-connector_Response",
+                                "$ref": (
+                                    "#/components/schemas/execute-connector_Response"
+                                ),
                             }
                         }
                     },
@@ -413,7 +433,9 @@ class ConnectionsClient:
                                     f"Returns {entity} of json schema:"
                                     f" {schema_as_string}"
                                 ),
-                                "$ref": "#/components/schemas/execute-connector_Response",
+                                "$ref": (
+                                    "#/components/schemas/execute-connector_Response"
+                                ),
                             }
                         }
                     },
@@ -450,7 +472,9 @@ class ConnectionsClient:
                     "content": {
                         "application/json": {
                             "schema": {
-                                "$ref": "#/components/schemas/execute-connector_Response"
+                                "$ref": (
+                                    "#/components/schemas/execute-connector_Response"
+                                )
                             }
                         }
                     },
@@ -487,7 +511,9 @@ class ConnectionsClient:
                     "content": {
                         "application/json": {
                             "schema": {
-                                "$ref": "#/components/schemas/execute-connector_Response"
+                                "$ref": (
+                                    "#/components/schemas/execute-connector_Response"
+                                )
                             }
                         }
                     },
@@ -524,7 +550,9 @@ class ConnectionsClient:
                     "content": {
                         "application/json": {
                             "schema": {
-                                "$ref": "#/components/schemas/execute-connector_Response"
+                                "$ref": (
+                                    "#/components/schemas/execute-connector_Response"
+                                )
                             }
                         }
                     },
@@ -661,6 +689,7 @@ class ConnectionsClient:
             "serviceName": {"$ref": "#/components/schemas/serviceName"},
             "host": {"$ref": "#/components/schemas/host"},
             "entity": {"$ref": "#/components/schemas/entity"},
+            "sortByColumns": {"$ref": "#/components/schemas/sortByColumns"},
             "dynamicAuthConfig": {
                 "$ref": "#/components/schemas/dynamicAuthConfig"
             },
@@ -728,6 +757,9 @@ class ConnectionsClient:
             "query": {"$ref": "#/components/schemas/query"},
             "timeout": {"$ref": "#/components/schemas/timeout"},
             "pageSize": {"$ref": "#/components/schemas/pageSize"},
+            "dynamicAuthConfig": {
+                "$ref": "#/components/schemas/dynamicAuthConfig"
+            },
         },
     }
 
@@ -796,8 +828,10 @@ class ConnectionsClient:
       )
     else:
       try:
-        credentials, _ = default_service_credential()
-      except:
+        credentials, _ = default_service_credential(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+      except google.auth.exceptions.DefaultCredentialsError:
         credentials = None
 
     if not credentials:

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,25 +14,36 @@
 
 
 import json
-from unittest.mock import MagicMock, patch
+import ssl
+from unittest import mock
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
-from fastapi.openapi.models import MediaType, Operation
+from fastapi.openapi.models import MediaType
+from fastapi.openapi.models import Operation
 from fastapi.openapi.models import Parameter as OpenAPIParameter
 from fastapi.openapi.models import RequestBody
 from fastapi.openapi.models import Schema as OpenAPISchema
+from google.adk.auth.auth_credential import AuthCredential
+from google.adk.auth.auth_credential import AuthCredentialTypes
+from google.adk.auth.auth_credential import HttpAuth
+from google.adk.auth.auth_credential import HttpCredentials
+from google.adk.features import FeatureName
+from google.adk.features._feature_registry import temporary_feature_override
 from google.adk.sessions.state import State
 from google.adk.tools.openapi_tool.auth.auth_helpers import token_to_scheme_credential
 from google.adk.tools.openapi_tool.common.common import ApiParameter
 from google.adk.tools.openapi_tool.openapi_spec_parser.openapi_spec_parser import OperationEndpoint
 from google.adk.tools.openapi_tool.openapi_spec_parser.operation_parser import OperationParser
-from google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool import (
-    RestApiTool,
-    snake_to_lower_camel,
-    to_gemini_schema,
-)
+from google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool import RestApiTool
+from google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool import snake_to_lower_camel
 from google.adk.tools.tool_context import ToolContext
-from google.genai.types import FunctionDeclaration, Schema, Type
+from google.genai.types import FunctionDeclaration
+from google.genai.types import Schema
+import httpx
 import pytest
+import requests
 
 
 class TestRestApiTool:
@@ -45,6 +56,11 @@ class TestRestApiTool:
     mock_context.get_auth_response.return_value = {}
     mock_context.request_credential.return_value = {}
     return mock_context
+
+  @pytest.fixture
+  def mock_ssl_context(self):
+    """Fixture for a mock ssl.SSLContext."""
+    return mock.create_autospec(ssl.SSLContext)
 
   @pytest.fixture
   def mock_operation_parser(self):
@@ -191,10 +207,50 @@ class TestRestApiTool:
     assert declaration.description == "Test description"
     assert isinstance(declaration.parameters, Schema)
 
+  def test_get_declaration_with_json_schema_feature_enabled(
+      self, sample_endpoint, sample_operation
+  ):
+    """Test that _get_declaration uses parameters_json_schema when feature is enabled."""
+    mock_parser = MagicMock(spec=OperationParser)
+    mock_parser.get_json_schema.return_value = {
+        "type": "object",
+        "properties": {
+            "test_param": {"type": "string"},
+        },
+        "required": ["test_param"],
+    }
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test description",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        should_parse_operation=False,
+    )
+    tool._operation_parser = mock_parser
+
+    with temporary_feature_override(
+        FeatureName.JSON_SCHEMA_FOR_FUNC_DECL, True
+    ):
+      declaration = tool._get_declaration()
+
+    assert isinstance(declaration, FunctionDeclaration)
+    assert declaration.name == "test_tool"
+    assert declaration.description == "Test description"
+    assert declaration.parameters is None
+    assert declaration.parameters_json_schema == {
+        "type": "object",
+        "properties": {
+            "test_param": {"type": "string"},
+        },
+        "required": ["test_param"],
+    }
+
   @patch(
-      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool.requests.request"
+      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool._request"
   )
-  def test_call_success(
+  @pytest.mark.asyncio
+  async def test_call_success(
       self,
       mock_request,
       mock_tool_context,
@@ -217,15 +273,66 @@ class TestRestApiTool:
     )
 
     # Call the method
-    result = tool.call(args={}, tool_context=mock_tool_context)
+    result = await tool.call(args={}, tool_context=mock_tool_context)
 
     # Check the result
     assert result == {"result": "success"}
 
   @patch(
-      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool.requests.request"
+      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool._request"
   )
-  def test_call_auth_pending(
+  @pytest.mark.asyncio
+  async def test_call_http_failure(
+      self,
+      mock_request,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.content = b"Internal Server Error"
+
+    # Create a proper HTTPStatusError with request and response
+    mock_http_request = MagicMock(spec=httpx.Request)
+    mock_response.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "500 Server Error",
+            request=mock_http_request,
+            response=mock_response,
+        )
+    )
+    mock_request.return_value = mock_response
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+    )
+
+    # Call the method
+    result = await tool.call(args={}, tool_context=mock_tool_context)
+
+    # Check the result
+    assert result == {
+        "error": (
+            "Tool test_tool execution failed. Analyze this execution error"
+            " and your inputs. Retry with adjustments if applicable. But"
+            " make sure don't retry more than 3 times. Execution Error:"
+            " Status Code: 500, Internal Server Error"
+        )
+    }
+
+  @patch(
+      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool._request"
+  )
+  @pytest.mark.asyncio
+  async def test_call_auth_pending(
       self,
       mock_request,
       sample_endpoint,
@@ -246,16 +353,70 @@ class TestRestApiTool:
         "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool.ToolAuthHandler.from_tool_context"
     ) as mock_from_tool_context:
       mock_tool_auth_handler_instance = MagicMock()
-      mock_tool_auth_handler_instance.prepare_auth_credentials.return_value.state = (
-          "pending"
+      mock_prepare_result = MagicMock()
+      mock_prepare_result.state = "pending"
+      mock_tool_auth_handler_instance.prepare_auth_credentials = AsyncMock(
+          return_value=mock_prepare_result
       )
       mock_from_tool_context.return_value = mock_tool_auth_handler_instance
 
-      response = tool.call(args={}, tool_context=None)
+      response = await tool.call(args={}, tool_context=None)
       assert response == {
           "pending": True,
           "message": "Needs your authorization to access your data.",
       }
+
+  @patch(
+      "google.adk.tools.openapi_tool.openapi_spec_parser.rest_api_tool._request"
+  )
+  @pytest.mark.asyncio
+  async def test_call_with_required_param_defaults(
+      self,
+      mock_request,
+      mock_tool_context,
+      sample_endpoint,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that required parameters with defaults are auto-filled."""
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"result": "success"}
+    mock_request.return_value = mock_response
+
+    # Create operation with required parameter that has default
+    mock_operation = Operation(
+        operationId="test_op",
+        parameters=[
+            OpenAPIParameter(**{
+                "name": "userId",
+                "in": "path",
+                "required": True,
+                "schema": OpenAPISchema(type="string", default="me"),
+            })
+        ],
+    )
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=OperationEndpoint(
+            base_url="https://example.com",
+            path="/users/{userId}/messages",
+            method="GET",
+        ),
+        operation=mock_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+    )
+
+    # Call without providing userId - should use default "me"
+    result = await tool.call(args={}, tool_context=mock_tool_context)
+
+    # Verify the default was applied
+    assert mock_request.called
+    call_kwargs = mock_request.call_args[1]
+    assert call_kwargs["url"] == "https://example.com/users/me/messages"
+    assert result == {"result": "success"}
 
   def test_prepare_request_params_query_body(
       self, sample_endpoint, sample_auth_credential, sample_auth_scheme
@@ -613,6 +774,35 @@ class TestRestApiTool:
 
     assert request_params["cookies"]["session_id"] == "cookie_value"
 
+  def test_prepare_request_params_quota_project_id(
+      self,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+  ):
+    auth_credential = AuthCredential(
+        auth_type=AuthCredentialTypes.HTTP,
+        http=HttpAuth(
+            scheme="bearer",
+            credentials=HttpCredentials(),
+            additional_headers={"x-goog-user-project": "test-project"},
+        ),
+    )
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_credential=auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+    params = []
+    kwargs = {}
+
+    request_params = tool._prepare_request_params(params, kwargs)
+
+    assert request_params["headers"]["x-goog-user-project"] == "test-project"
+
   def test_prepare_request_params_multiple_mime_types(
       self, sample_endpoint, sample_auth_credential, sample_auth_scheme
   ):
@@ -680,6 +870,65 @@ class TestRestApiTool:
 
     # Make sure unknown parameters are ignored and do not raise errors.
     assert "unknown_param" not in request_params["params"]
+
+  def test_prepare_request_params_merges_default_headers(
+      self,
+      sample_endpoint,
+      sample_auth_credential,
+      sample_auth_scheme,
+      sample_operation,
+  ):
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+    tool.set_default_headers({"developer-token": "token"})
+
+    request_params = tool._prepare_request_params([], {})
+
+    assert request_params["headers"]["developer-token"] == "token"
+
+  def test_prepare_request_params_preserves_existing_headers(
+      self,
+      sample_endpoint,
+      sample_auth_credential,
+      sample_auth_scheme,
+      sample_operation,
+      sample_api_parameters,
+  ):
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+    tool.set_default_headers({
+        "Content-Type": "text/plain",
+        "developer-token": "token",
+        "User-Agent": "custom-default",
+    })
+
+    header_param = ApiParameter(
+        original_name="User-Agent",
+        py_name="user_agent",
+        param_location="header",
+        param_schema=OpenAPISchema(type="string"),
+    )
+
+    params = sample_api_parameters + [header_param]
+    kwargs = {"test_body_param": "value", "user_agent": "api-client"}
+
+    request_params = tool._prepare_request_params(params, kwargs)
+
+    assert request_params["headers"]["Content-Type"] == "application/json"
+    assert request_params["headers"]["developer-token"] == "token"
+    assert request_params["headers"]["User-Agent"] == "api-client"
 
   def test_prepare_request_params_base_url_handling(
       self, sample_auth_credential, sample_auth_scheme, sample_operation
@@ -774,236 +1023,448 @@ class TestRestApiTool:
     assert "param_name" in request_params["params"]
     assert "empty_param" not in request_params["params"]
 
+  @pytest.mark.parametrize(
+      "verify_input, expected_verify_in_call",
+      [
+          (True, True),
+          (False, False),
+          (
+              "/path/to/enterprise-ca-bundle.crt",
+              "/path/to/enterprise-ca-bundle.crt",
+          ),
+          (
+              "USE_SSL_FIXTURE",
+              "USE_SSL_FIXTURE",
+          ),
+          (None, None),  # None means 'verify' should not be in call_kwargs
+      ],
+  )
+  async def test_call_with_verify_options(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+      mock_ssl_context,
+      verify_input,
+      expected_verify_in_call,
+  ):
+    """Test different values for the 'verify' parameter."""
+    if verify_input == "USE_SSL_FIXTURE":
+      verify_input = mock_ssl_context
+    if expected_verify_in_call == "USE_SSL_FIXTURE":
+      expected_verify_in_call = mock_ssl_context
 
-class TestToGeminiSchema:
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
 
-  def test_to_gemini_schema_none(self):
-    assert to_gemini_schema(None) is None
-
-  def test_to_gemini_schema_not_dict(self):
-    with pytest.raises(TypeError, match="openapi_schema must be a dictionary"):
-      to_gemini_schema("not a dict")
-
-  def test_to_gemini_schema_empty_dict(self):
-    result = to_gemini_schema({})
-    assert isinstance(result, Schema)
-    assert result.type == Type.OBJECT
-    assert result.properties is None
-
-  def test_to_gemini_schema_dict_with_only_object_type(self):
-    result = to_gemini_schema({"type": "object"})
-    assert isinstance(result, Schema)
-    assert result.type == Type.OBJECT
-    assert result.properties is None
-
-  def test_to_gemini_schema_basic_types(self):
-    openapi_schema = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-            "is_active": {"type": "boolean"},
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert isinstance(gemini_schema, Schema)
-    assert gemini_schema.type == Type.OBJECT
-    assert gemini_schema.properties["name"].type == Type.STRING
-    assert gemini_schema.properties["age"].type == Type.INTEGER
-    assert gemini_schema.properties["is_active"].type == Type.BOOLEAN
-
-  def test_to_gemini_schema_array_string_types(self):
-    openapi_schema = {
-        "type": "object",
-        "properties": {
-            "boolean_field": {"type": "boolean"},
-            "nonnullable_string": {"type": ["string"]},
-            "nullable_string": {"type": ["string", "null"]},
-            "nullable_number": {"type": ["null", "integer"]},
-            "object_nullable": {"type": "null"},
-            "multi_types_nullable": {"type": ["string", "null", "integer"]},
-            "empty_default_object": {},
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert isinstance(gemini_schema, Schema)
-    assert gemini_schema.type == Type.OBJECT
-    assert gemini_schema.properties["boolean_field"].type == Type.BOOLEAN
-
-    assert gemini_schema.properties["nonnullable_string"].type == Type.STRING
-    assert not gemini_schema.properties["nonnullable_string"].nullable
-
-    assert gemini_schema.properties["nullable_string"].type == Type.STRING
-    assert gemini_schema.properties["nullable_string"].nullable
-
-    assert gemini_schema.properties["nullable_number"].type == Type.INTEGER
-    assert gemini_schema.properties["nullable_number"].nullable
-
-    assert gemini_schema.properties["object_nullable"].type == Type.OBJECT
-    assert gemini_schema.properties["object_nullable"].nullable
-
-    assert gemini_schema.properties["multi_types_nullable"].type == Type.STRING
-    assert gemini_schema.properties["multi_types_nullable"].nullable
-
-    assert gemini_schema.properties["empty_default_object"].type == Type.OBJECT
-    assert not gemini_schema.properties["empty_default_object"].nullable
-
-  def test_to_gemini_schema_nested_objects(self):
-    openapi_schema = {
-        "type": "object",
-        "properties": {
-            "address": {
-                "type": "object",
-                "properties": {
-                    "street": {"type": "string"},
-                    "city": {"type": "string"},
-                },
-            }
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.properties["address"].type == Type.OBJECT
-    assert (
-        gemini_schema.properties["address"].properties["street"].type
-        == Type.STRING
+    mock_client = mock.create_autospec(
+        httpx.AsyncClient, instance=True, spec_set=True
     )
-    assert (
-        gemini_schema.properties["address"].properties["city"].type
-        == Type.STRING
+    mock_client.request = AsyncMock(return_value=mock_response)
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+        ssl_verify=verify_input,
     )
 
-  def test_to_gemini_schema_array(self):
-    openapi_schema = {
-        "type": "array",
-        "items": {"type": "string"},
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.type == Type.ARRAY
-    assert gemini_schema.items.type == Type.STRING
+    with patch.object(
+        httpx, "AsyncClient", return_value=mock_client, autospec=True
+    ) as mock_request:
 
-  def test_to_gemini_schema_nested_array(self):
-    openapi_schema = {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.items.properties["name"].type == Type.STRING
+      await tool.call(args={}, tool_context=mock_tool_context)
 
-  def test_to_gemini_schema_any_of(self):
-    openapi_schema = {
-        "anyOf": [{"type": "string"}, {"type": "integer"}],
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert len(gemini_schema.any_of) == 2
-    assert gemini_schema.any_of[0].type == Type.STRING
-    assert gemini_schema.any_of[1].type == Type.INTEGER
+      assert mock_request.called
+      _, call_kwargs = mock_request.call_args
+      if expected_verify_in_call is None:
+        assert "verify" not in call_kwargs or call_kwargs["verify"] is True
+      else:
+        assert call_kwargs["verify"] == expected_verify_in_call
 
-  def test_to_gemini_schema_general_list(self):
-    openapi_schema = {
-        "type": "array",
-        "properties": {
-            "list_field": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.properties["list_field"].type == Type.ARRAY
-    assert gemini_schema.properties["list_field"].items.type == Type.STRING
+  async def test_request_uses_no_default_timeout(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that _request creates AsyncClient with timeout=None.
 
-  def test_to_gemini_schema_enum(self):
-    openapi_schema = {"type": "string", "enum": ["a", "b", "c"]}
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.enum == ["a", "b", "c"]
+    httpx defaults to a 5-second timeout, which is too short for many
+    real-world API calls. Verify that we explicitly disable the timeout
+    to match the previous requests-library behavior (no timeout).
+    Regression test for https://github.com/google/adk-python/issues/4431.
+    """
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
 
-  def test_to_gemini_schema_required(self):
-    openapi_schema = {
-        "type": "object",
-        "required": ["name"],
-        "properties": {"name": {"type": "string"}},
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.required == ["name"]
-
-  def test_to_gemini_schema_nested_dict(self):
-    openapi_schema = {
-        "type": "object",
-        "properties": {
-            "metadata": {
-                "type": "object",
-                "properties": {
-                    "key1": {"type": "object"},
-                    "key2": {"type": "string"},
-                },
-            }
-        },
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    # Since metadata is not properties nor item, it will call to_gemini_schema recursively.
-    assert isinstance(gemini_schema.properties["metadata"], Schema)
-    assert (
-        gemini_schema.properties["metadata"].type == Type.OBJECT
-    )  # add object type by default
-    assert len(gemini_schema.properties["metadata"].properties) == 2
-    assert (
-        gemini_schema.properties["metadata"].properties["key1"].type
-        == Type.OBJECT
+    mock_client = mock.create_autospec(
+        httpx.AsyncClient, instance=True, spec_set=True
     )
-    assert (
-        gemini_schema.properties["metadata"].properties["key2"].type
-        == Type.STRING
+    mock_client.request = AsyncMock(return_value=mock_response)
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
     )
 
-  def test_to_gemini_schema_ignore_title_default_format(self):
-    openapi_schema = {
-        "type": "string",
-        "title": "Test Title",
-        "default": "default_value",
-        "format": "date",
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
+    with patch.object(
+        httpx, "AsyncClient", return_value=mock_client, autospec=True
+    ) as mock_async_client:
+      await tool.call(args={}, tool_context=mock_tool_context)
 
-    assert gemini_schema.title is None
-    assert gemini_schema.default is None
-    assert gemini_schema.format is None
+      assert mock_async_client.called
+      _, call_kwargs = mock_async_client.call_args
+      assert call_kwargs["timeout"] is None
 
-  def test_to_gemini_schema_property_ordering(self):
-    openapi_schema = {
-        "type": "object",
-        "propertyOrdering": ["name", "age"],
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-        },
-    }
+  async def test_call_with_configure_verify(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that configure_verify updates the verify setting."""
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
 
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.property_ordering == ["name", "age"]
+    mock_client = mock.create_autospec(
+        httpx.AsyncClient, instance=True, spec_set=True
+    )
+    mock_client.request = AsyncMock(return_value=mock_response)
 
-  def test_to_gemini_schema_converts_property_dict(self):
-    openapi_schema = {
-        "properties": {
-            "name": {"type": "string", "description": "The property key"},
-            "value": {"type": "string", "description": "The property value"},
-        },
-        "type": "object",
-        "description": "A single property entry in the Properties message.",
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.type == Type.OBJECT
-    assert gemini_schema.properties["name"].type == Type.STRING
-    assert gemini_schema.properties["value"].type == Type.STRING
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+    )
 
-  def test_to_gemini_schema_remove_unrecognized_fields(self):
-    openapi_schema = {
-        "type": "string",
-        "description": "A single date string.",
-        "format": "date",
-    }
-    gemini_schema = to_gemini_schema(openapi_schema)
-    assert gemini_schema.type == Type.STRING
-    assert not gemini_schema.format
+    ca_bundle_path = "/path/to/custom-ca.crt"
+    tool.configure_ssl_verify(ca_bundle_path)
+
+    with patch.object(
+        httpx, "AsyncClient", return_value=mock_client, autospec=True
+    ) as mock_request:
+      await tool.call(args={}, tool_context=mock_tool_context)
+
+      assert mock_request.called
+      call_kwargs = mock_request.call_args[1]
+      assert call_kwargs["verify"] == ca_bundle_path
+
+  def test_init_with_header_provider(
+      self,
+      sample_endpoint,
+      sample_operation,
+  ):
+    """Test that header_provider is stored correctly."""
+
+    def my_header_provider(context):
+      return {"X-Custom": "value"}
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        header_provider=my_header_provider,
+    )
+    assert tool._header_provider is my_header_provider
+
+  def test_init_header_provider_none_by_default(
+      self,
+      sample_endpoint,
+      sample_operation,
+  ):
+    """Test that header_provider is None by default."""
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+    )
+    assert tool._header_provider is None
+
+  @pytest.mark.asyncio
+  async def test_call_with_header_provider(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that header_provider adds headers to the request."""
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
+
+    def my_header_provider(context):
+      return {"X-Custom-Header": "custom-value", "X-Request-ID": "12345"}
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+        header_provider=my_header_provider,
+    )
+
+    with patch.object(
+        httpx.AsyncClient, "request", return_value=mock_response, autospec=True
+    ) as mock_request:
+      await tool.call(args={}, tool_context=mock_tool_context)
+
+      # Verify the headers were added to the request
+      assert mock_request.called
+      _, call_kwargs = mock_request.call_args
+
+      assert call_kwargs["headers"]["X-Custom-Header"] == "custom-value"
+      assert call_kwargs["headers"]["X-Request-ID"] == "12345"
+
+  @pytest.mark.asyncio
+  async def test_call_header_provider_receives_tool_context(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that header_provider receives the tool_context."""
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
+
+    received_context = []
+
+    def my_header_provider(context):
+      received_context.append(context)
+      return {"X-Test": "test"}
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+        header_provider=my_header_provider,
+    )
+
+    with patch.object(
+        httpx.AsyncClient, "request", return_value=mock_response, autospec=True
+    ):
+      await tool.call(args={}, tool_context=mock_tool_context)
+
+      # Verify header_provider was called with the tool_context
+      assert len(received_context) == 1
+      assert received_context[0] is mock_tool_context
+
+  @pytest.mark.asyncio
+  async def test_call_without_header_provider(
+      self,
+      mock_tool_context,
+      sample_endpoint,
+      sample_operation,
+      sample_auth_scheme,
+      sample_auth_credential,
+  ):
+    """Test that call works without header_provider."""
+    mock_response = mock.create_autospec(requests.Response, instance=True)
+    mock_response.json.return_value = {"result": "success"}
+    mock_response.configure_mock(status_code=200)
+
+    tool = RestApiTool(
+        name="test_tool",
+        description="Test Tool",
+        endpoint=sample_endpoint,
+        operation=sample_operation,
+        auth_scheme=sample_auth_scheme,
+        auth_credential=sample_auth_credential,
+    )
+
+    with patch.object(
+        httpx.AsyncClient, "request", return_value=mock_response, autospec=True
+    ):
+      result = await tool.call(args={}, tool_context=mock_tool_context)
+
+      assert result == {"result": "success"}
+
+  def test_prepare_request_params_extracts_embedded_query_params(
+      self, sample_auth_credential, sample_auth_scheme
+  ):
+    """Test that query params embedded in the URL path are extracted.
+
+    ApplicationIntegrationToolset embeds query params and fragments directly
+    in the OpenAPI path (e.g. '...execute?triggerId=api_trigger/Name#action').
+    These must be moved into the explicit query_params dict so httpx does not
+    strip them when it replaces the URL query string with the `params` arg.
+    Regression test for https://github.com/google/adk-python/issues/4555.
+    """
+    integration_path = (
+        "/v2/projects/my-proj/locations/us-central1"
+        "/integrations/ExecuteConnection:execute"
+        "?triggerId=api_trigger/ExecuteConnection"
+        "#POST_files"
+    )
+    endpoint = OperationEndpoint(
+        base_url="https://integrations.googleapis.com",
+        path=integration_path,
+        method="POST",
+    )
+    operation = Operation(operationId="test_op")
+    tool = RestApiTool(
+        name="test_tool",
+        description="test",
+        endpoint=endpoint,
+        operation=operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+
+    request_params = tool._prepare_request_params([], {})
+
+    # The embedded query param must appear in params
+    assert request_params["params"]["triggerId"] == (
+        "api_trigger/ExecuteConnection"
+    )
+    # The URL must NOT contain the query string or fragment
+    assert "?" not in request_params["url"]
+    assert "#" not in request_params["url"]
+    assert request_params["url"] == (
+        "https://integrations.googleapis.com"
+        "/v2/projects/my-proj/locations/us-central1"
+        "/integrations/ExecuteConnection:execute"
+    )
+
+  def test_prepare_request_params_merges_embedded_and_explicit_query_params(
+      self, sample_auth_credential, sample_auth_scheme
+  ):
+    """Embedded URL query params merge with explicitly defined query params."""
+    endpoint = OperationEndpoint(
+        base_url="https://example.com",
+        path="/api?embedded_key=embedded_val",
+        method="GET",
+    )
+    operation = Operation(operationId="test_op")
+    tool = RestApiTool(
+        name="test_tool",
+        description="test",
+        endpoint=endpoint,
+        operation=operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+    params = [
+        ApiParameter(
+            original_name="explicit_key",
+            py_name="explicit_key",
+            param_location="query",
+            param_schema=OpenAPISchema(type="string"),
+        ),
+    ]
+    kwargs = {"explicit_key": "explicit_val"}
+
+    request_params = tool._prepare_request_params(params, kwargs)
+
+    assert request_params["params"]["embedded_key"] == "embedded_val"
+    assert request_params["params"]["explicit_key"] == "explicit_val"
+    assert "?" not in request_params["url"]
+
+  def test_prepare_request_params_explicit_query_param_takes_precedence(
+      self, sample_auth_credential, sample_auth_scheme
+  ):
+    """Explicitly defined query params take precedence over embedded ones."""
+    endpoint = OperationEndpoint(
+        base_url="https://example.com",
+        path="/api?key=embedded",
+        method="GET",
+    )
+    operation = Operation(operationId="test_op")
+    tool = RestApiTool(
+        name="test_tool",
+        description="test",
+        endpoint=endpoint,
+        operation=operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+    params = [
+        ApiParameter(
+            original_name="key",
+            py_name="key",
+            param_location="query",
+            param_schema=OpenAPISchema(type="string"),
+        ),
+    ]
+    kwargs = {"key": "explicit"}
+
+    request_params = tool._prepare_request_params(params, kwargs)
+
+    # Explicit value wins over the embedded one
+    assert request_params["params"]["key"] == "explicit"
+
+  def test_prepare_request_params_strips_fragment_only(
+      self, sample_auth_credential, sample_auth_scheme
+  ):
+    """Fragment-only paths (no query string) are also cleaned."""
+    endpoint = OperationEndpoint(
+        base_url="https://example.com",
+        path="/api#fragment",
+        method="GET",
+    )
+    operation = Operation(operationId="test_op")
+    tool = RestApiTool(
+        name="test_tool",
+        description="test",
+        endpoint=endpoint,
+        operation=operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+
+    request_params = tool._prepare_request_params([], {})
+
+    assert "#" not in request_params["url"]
+    assert request_params["url"] == "https://example.com/api"
+
+  def test_prepare_request_params_plain_url_unchanged(
+      self, sample_endpoint, sample_auth_credential, sample_auth_scheme
+  ):
+    """URLs without embedded query or fragment are not modified."""
+    operation = Operation(operationId="test_op")
+    tool = RestApiTool(
+        name="test_tool",
+        description="test",
+        endpoint=sample_endpoint,
+        operation=operation,
+        auth_credential=sample_auth_credential,
+        auth_scheme=sample_auth_scheme,
+    )
+
+    request_params = tool._prepare_request_params([], {})
+
+    assert request_params["url"] == "https://example.com/test"
 
 
 def test_snake_to_lower_camel():

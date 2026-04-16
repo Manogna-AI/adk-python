@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,13 +21,13 @@ from unittest import mock
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.llm_agent import Agent
-from google.adk.models import LlmRequest
-from google.adk.models import LlmResponse
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import BaseModel
 import pytest
 
-from .. import utils
+from .. import testing_utils
 
 
 class CallbackType(Enum):
@@ -42,7 +42,9 @@ async def mock_async_before_cb_side_effect(
 ):
   if ret_value:
     return LlmResponse(
-        content=utils.ModelContent([types.Part.from_text(text=ret_value)])
+        content=testing_utils.ModelContent(
+            [types.Part.from_text(text=ret_value)]
+        )
     )
   return None
 
@@ -54,7 +56,9 @@ def mock_sync_before_cb_side_effect(
 ):
   if ret_value:
     return LlmResponse(
-        content=utils.ModelContent([types.Part.from_text(text=ret_value)])
+        content=testing_utils.ModelContent(
+            [types.Part.from_text(text=ret_value)]
+        )
     )
   return None
 
@@ -66,7 +70,9 @@ async def mock_async_after_cb_side_effect(
 ):
   if ret_value:
     return LlmResponse(
-        content=utils.ModelContent([types.Part.from_text(text=ret_value)])
+        content=testing_utils.ModelContent(
+            [types.Part.from_text(text=ret_value)]
+        )
     )
   return None
 
@@ -78,7 +84,9 @@ def mock_sync_after_cb_side_effect(
 ):
   if ret_value:
     return LlmResponse(
-        content=utils.ModelContent([types.Part.from_text(text=ret_value)])
+        content=testing_utils.ModelContent(
+            [types.Part.from_text(text=ret_value)]
+        )
     )
   return None
 
@@ -129,7 +137,7 @@ async def test_before_model_callbacks_chain(
     expected_calls: List[int],
 ):
   responses = ["model_response"]
-  mock_model = utils.MockModel.create(responses=responses)
+  mock_model = testing_utils.MockModel.create(responses=responses)
 
   mock_cbs = []
   for response, callback_type in callbacks:
@@ -154,9 +162,9 @@ async def test_before_model_callbacks_chain(
       before_model_callback=[mock_cb for mock_cb in mock_cbs],
   )
 
-  runner = utils.TestInMemoryRunner(agent)
+  runner = testing_utils.TestInMemoryRunner(agent)
   result = await runner.run_async_with_new_session("test")
-  assert utils.simplify_events(result) == [
+  assert testing_utils.simplify_events(result) == [
       ("root_agent", expected_response),
   ]
 
@@ -191,7 +199,7 @@ async def test_after_model_callbacks_chain(
     expected_calls: List[int],
 ):
   responses = ["model_response"]
-  mock_model = utils.MockModel.create(responses=responses)
+  mock_model = testing_utils.MockModel.create(responses=responses)
 
   mock_cbs = []
   for response, callback_type in callbacks:
@@ -216,9 +224,9 @@ async def test_after_model_callbacks_chain(
       after_model_callback=[mock_cb for mock_cb in mock_cbs],
   )
 
-  runner = utils.TestInMemoryRunner(agent)
+  runner = testing_utils.TestInMemoryRunner(agent)
   result = await runner.run_async_with_new_session("test")
-  assert utils.simplify_events(result) == [
+  assert testing_utils.simplify_events(result) == [
       ("root_agent", expected_response),
   ]
 

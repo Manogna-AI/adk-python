@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,58 +16,17 @@ from typing import Any
 from typing import Dict
 from typing import List
 
-from fastapi.openapi.models import Response, Schema
+from fastapi.openapi.models import Response
+from fastapi.openapi.models import Schema
 from google.adk.tools.openapi_tool.common.common import ApiParameter
 from google.adk.tools.openapi_tool.common.common import PydocHelper
 from google.adk.tools.openapi_tool.common.common import rename_python_keywords
-from google.adk.tools.openapi_tool.common.common import to_snake_case
 from google.adk.tools.openapi_tool.common.common import TypeHintHelper
 import pytest
 
 
 def dict_to_responses(input: Dict[str, Any]) -> Dict[str, Response]:
   return {k: Response.model_validate(input[k]) for k in input}
-
-
-class TestToSnakeCase:
-
-  @pytest.mark.parametrize(
-      'input_str, expected_output',
-      [
-          ('lowerCamelCase', 'lower_camel_case'),
-          ('UpperCamelCase', 'upper_camel_case'),
-          ('space separated', 'space_separated'),
-          ('REST API', 'rest_api'),
-          ('Mixed_CASE with_Spaces', 'mixed_case_with_spaces'),
-          ('__init__', 'init'),
-          ('APIKey', 'api_key'),
-          ('SomeLongURL', 'some_long_url'),
-          ('CONSTANT_CASE', 'constant_case'),
-          ('already_snake_case', 'already_snake_case'),
-          ('single', 'single'),
-          ('', ''),
-          ('  spaced  ', 'spaced'),
-          ('with123numbers', 'with123numbers'),
-          ('With_Mixed_123_and_SPACES', 'with_mixed_123_and_spaces'),
-          ('HTMLParser', 'html_parser'),
-          ('HTTPResponseCode', 'http_response_code'),
-          ('a_b_c', 'a_b_c'),
-          ('A_B_C', 'a_b_c'),
-          ('fromAtoB', 'from_ato_b'),
-          ('XMLHTTPRequest', 'xmlhttp_request'),
-          ('_leading', 'leading'),
-          ('trailing_', 'trailing'),
-          ('  leading_and_trailing_  ', 'leading_and_trailing'),
-          ('Multiple___Underscores', 'multiple_underscores'),
-          ('  spaces_and___underscores  ', 'spaces_and_underscores'),
-          ('  _mixed_Case  ', 'mixed_case'),
-          ('123Start', '123_start'),
-          ('End123', 'end123'),
-          ('Mid123dle', 'mid123dle'),
-      ],
-  )
-  def test_to_snake_case(self, input_str, expected_output):
-    assert to_snake_case(input_str) == expected_output
 
 
 class TestRenamePythonKeywords:
@@ -114,6 +73,24 @@ class TestApiParameter:
         param_schema=schema,
     )
     assert param.py_name == 'param_in'
+
+  def test_api_parameter_uses_location_default_when_name_missing(self):
+    schema = Schema(type='string')
+    param = ApiParameter(
+        original_name='',
+        param_location='body',
+        param_schema=schema,
+    )
+    assert param.py_name == 'body'
+
+  def test_api_parameter_uses_value_default_when_location_unknown(self):
+    schema = Schema(type='integer')
+    param = ApiParameter(
+        original_name='',
+        param_location='',
+        param_schema=schema,
+    )
+    assert param.py_name == 'value'
 
   def test_api_parameter_custom_py_name(self):
     schema = Schema(type='integer')
@@ -208,7 +185,6 @@ class TestApiParameter:
               'List[Dict[str, Any]]',
           ),
           ({'type': 'object'}, Dict[str, Any], 'Dict[str, Any]'),
-          ({'type': 'unknown'}, Any, 'Any'),
           ({}, Any, 'Any'),
       ],
   )

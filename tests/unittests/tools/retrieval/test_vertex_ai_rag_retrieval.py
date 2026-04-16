@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from google.adk.agents import Agent
+from google.adk.agents.llm_agent import Agent
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.retrieval.vertex_ai_rag_retrieval import VertexAiRagRetrieval
 from google.genai import types
 
-from ... import utils
+from ... import testing_utils
 
 
 def noop_tool(x: str) -> str:
@@ -28,7 +28,7 @@ def test_vertex_rag_retrieval_for_gemini_1_x():
   responses = [
       'response1',
   ]
-  mockModel = utils.MockModel.create(responses=responses)
+  mockModel = testing_utils.MockModel.create(responses=responses)
   mockModel.model = 'gemini-1.5-pro'
 
   # Calls the first time.
@@ -45,12 +45,12 @@ def test_vertex_rag_retrieval_for_gemini_1_x():
           )
       ],
   )
-  runner = utils.InMemoryRunner(agent)
+  runner = testing_utils.InMemoryRunner(agent)
   events = runner.run('test1')
 
   # Asserts the requests.
   assert len(mockModel.requests) == 1
-  assert utils.simplify_contents(mockModel.requests[0].contents) == [
+  assert testing_utils.simplify_contents(mockModel.requests[0].contents) == [
       ('user', 'test1'),
   ]
   assert len(mockModel.requests[0].config.tools) == 1
@@ -65,7 +65,7 @@ def test_vertex_rag_retrieval_for_gemini_1_x_with_another_function_tool():
   responses = [
       'response1',
   ]
-  mockModel = utils.MockModel.create(responses=responses)
+  mockModel = testing_utils.MockModel.create(responses=responses)
   mockModel.model = 'gemini-1.5-pro'
 
   # Calls the first time.
@@ -83,12 +83,12 @@ def test_vertex_rag_retrieval_for_gemini_1_x_with_another_function_tool():
           FunctionTool(func=noop_tool),
       ],
   )
-  runner = utils.InMemoryRunner(agent)
+  runner = testing_utils.InMemoryRunner(agent)
   events = runner.run('test1')
 
   # Asserts the requests.
   assert len(mockModel.requests) == 1
-  assert utils.simplify_contents(mockModel.requests[0].contents) == [
+  assert testing_utils.simplify_contents(mockModel.requests[0].contents) == [
       ('user', 'test1'),
   ]
   assert len(mockModel.requests[0].config.tools[0].function_declarations) == 2
@@ -107,7 +107,7 @@ def test_vertex_rag_retrieval_for_gemini_2_x():
   responses = [
       'response1',
   ]
-  mockModel = utils.MockModel.create(responses=responses)
+  mockModel = testing_utils.MockModel.create(responses=responses)
   mockModel.model = 'gemini-2.0-flash'
 
   # Calls the first time.
@@ -124,14 +124,54 @@ def test_vertex_rag_retrieval_for_gemini_2_x():
           )
       ],
   )
-  runner = utils.InMemoryRunner(agent)
+  runner = testing_utils.InMemoryRunner(agent)
   events = runner.run('test1')
 
   # Asserts the requests.
   assert len(mockModel.requests) == 1
-  assert utils.simplify_contents(mockModel.requests[0].contents) == [
+  assert testing_utils.simplify_contents(mockModel.requests[0].contents) == [
       ('user', 'test1'),
   ]
+  assert len(mockModel.requests[0].config.tools) == 1
+  assert mockModel.requests[0].config.tools == [
+      types.Tool(
+          retrieval=types.Retrieval(
+              vertex_rag_store=types.VertexRagStore(
+                  rag_corpora=[
+                      'projects/123456789/locations/us-central1/ragCorpora/1234567890'
+                  ]
+              )
+          )
+      )
+  ]
+  assert 'rag_retrieval' not in mockModel.requests[0].tools_dict
+
+
+def test_vertex_rag_retrieval_for_non_gemini_with_disabled_check(monkeypatch):
+  monkeypatch.setenv('ADK_DISABLE_GEMINI_MODEL_ID_CHECK', 'true')
+  responses = [
+      'response1',
+  ]
+  mockModel = testing_utils.MockModel.create(responses=responses)
+  mockModel.model = 'internal-model-v1'
+
+  agent = Agent(
+      name='root_agent',
+      model=mockModel,
+      tools=[
+          VertexAiRagRetrieval(
+              name='rag_retrieval',
+              description='rag_retrieval',
+              rag_corpora=[
+                  'projects/123456789/locations/us-central1/ragCorpora/1234567890'
+              ],
+          )
+      ],
+  )
+  runner = testing_utils.InMemoryRunner(agent)
+  runner.run('test1')
+
+  assert len(mockModel.requests) == 1
   assert len(mockModel.requests[0].config.tools) == 1
   assert mockModel.requests[0].config.tools == [
       types.Tool(

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,316 +12,545 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import asyncio
-from contextlib import asynccontextmanager
+from collections import deque
 from contextlib import AsyncExitStack
+from datetime import timedelta
 import functools
+import hashlib
+import json
 import logging
 import sys
+import threading
 from typing import Any
+from typing import Dict
 from typing import Optional
+from typing import Protocol
+from typing import runtime_checkable
 from typing import TextIO
+from typing import Union
 
-import anyio
+from mcp import ClientSession
+from mcp import SamplingCapability
+from mcp import StdioServerParameters
+from mcp.client.session import SamplingFnT
+from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import create_mcp_http_client
+from mcp.client.streamable_http import McpHttpClientFactory
+from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel
+from pydantic import ConfigDict
 
-try:
-  from mcp import ClientSession
-  from mcp import StdioServerParameters
-  from mcp.client.sse import sse_client
-  from mcp.client.stdio import stdio_client
-except ImportError as e:
-  import sys
-
-  if sys.version_info < (3, 10):
-    raise ImportError(
-        'MCP Tool requires Python 3.10 or above. Please upgrade your Python'
-        ' version.'
-    ) from e
-  else:
-    raise e
+from .session_context import SessionContext
 
 logger = logging.getLogger('google_adk.' + __name__)
 
 
-class SseServerParams(BaseModel):
+def _has_cancelled_error_context(exc: BaseException) -> bool:
+  """Returns True if `exc` is/was caused by `asyncio.CancelledError`.
+
+  Cancellation can be translated into other exceptions during teardown (e.g.
+  connection errors) while still retaining the original cancellation in an
+  exception's context chain.
+  """
+
+  seen: set[int] = set()
+  queue = deque([exc])
+  while queue:
+    current = queue.popleft()
+    if id(current) in seen:
+      continue
+    seen.add(id(current))
+    if isinstance(current, asyncio.CancelledError):
+      return True
+    if current.__cause__ is not None:
+      queue.append(current.__cause__)
+    if current.__context__ is not None:
+      queue.append(current.__context__)
+  return False
+
+
+class StdioConnectionParams(BaseModel):
+  """Parameters for the MCP Stdio connection.
+
+  Attributes:
+      server_params: Parameters for the MCP Stdio server.
+      timeout: Timeout in seconds for establishing the connection to the MCP
+        stdio server.
+  """
+
+  server_params: StdioServerParameters
+  timeout: float = 5.0
+
+
+class SseConnectionParams(BaseModel):
   """Parameters for the MCP SSE connection.
 
   See MCP SSE Client documentation for more details.
   https://github.com/modelcontextprotocol/python-sdk/blob/main/src/mcp/client/sse.py
+
+  Attributes:
+      url: URL for the MCP SSE server.
+      headers: Headers for the MCP SSE connection.
+      timeout: Timeout in seconds for establishing the connection to the MCP SSE
+        server.
+      sse_read_timeout: Timeout in seconds for reading data from the MCP SSE
+        server.
+      httpx_client_factory: Factory function to create a custom HTTPX client. If
+        not provided, a default factory will be used.
   """
+
+  model_config = ConfigDict(arbitrary_types_allowed=True)
 
   url: str
   headers: dict[str, Any] | None = None
-  timeout: float = 5
-  sse_read_timeout: float = 60 * 5
+  timeout: float = 5.0
+  sse_read_timeout: float = 60 * 5.0
+  httpx_client_factory: CheckableMcpHttpClientFactory = create_mcp_http_client
 
 
-def retry_on_closed_resource(async_reinit_func_name: str):
-  """Decorator to automatically reinitialize session and retry action.
+@runtime_checkable
+class CheckableMcpHttpClientFactory(McpHttpClientFactory, Protocol):
+  pass
 
-  When MCP session was closed, the decorator will automatically recreate the
-  session and retry the action with the same parameters.
 
-  Note:
-  1. async_reinit_func_name is the name of the class member function that
-  reinitializes the MCP session.
-  2. Both the decorated function and the async_reinit_func_name must be async
-  functions.
+class StreamableHTTPConnectionParams(BaseModel):
+  """Parameters for the MCP Streamable HTTP connection.
 
-  Usage:
-  class MCPTool:
-    ...
-    async def create_session(self):
-      self.session = ...
+  See MCP Streamable HTTP Client documentation for more details.
+  https://github.com/modelcontextprotocol/python-sdk/blob/main/src/mcp/client/streamable_http.py
 
-    @retry_on_closed_resource('create_session')
-    async def use_session(self):
-      await self.session.call_tool()
-
-  Args:
-    async_reinit_func_name: The name of the async function to recreate session.
-
-  Returns:
-    The decorated function.
+  Attributes:
+      url: URL for the MCP Streamable HTTP server.
+      headers: Headers for the MCP Streamable HTTP connection.
+      timeout: Timeout in seconds for establishing the connection to the MCP
+        Streamable HTTP server.
+      sse_read_timeout: Timeout in seconds for reading data from the MCP
+        Streamable HTTP server.
+      terminate_on_close: Whether to terminate the MCP Streamable HTTP server
+        when the connection is closed.
+      httpx_client_factory: Factory function to create a custom HTTPX client. If
+        not provided, a default factory will be used.
   """
 
-  def decorator(func):
-    @functools.wraps(
-        func
-    )  # Preserves original function metadata (name, docstring)
-    async def wrapper(self, *args, **kwargs):
-      try:
-        return await func(self, *args, **kwargs)
-      except anyio.ClosedResourceError:
-        try:
-          if hasattr(self, async_reinit_func_name) and callable(
-              getattr(self, async_reinit_func_name)
-          ):
-            async_init_fn = getattr(self, async_reinit_func_name)
-            await async_init_fn()
-          else:
-            raise ValueError(
-                f'Function {async_reinit_func_name} does not exist in decorated'
-                ' class. Please check the function name in'
-                ' retry_on_closed_resource decorator.'
-            )
-        except Exception as reinit_err:
-          raise RuntimeError(
-              f'Error reinitializing: {reinit_err}'
-          ) from reinit_err
-        return await func(self, *args, **kwargs)
+  model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    return wrapper
-
-  return decorator
+  url: str
+  headers: dict[str, Any] | None = None
+  timeout: float = 5.0
+  sse_read_timeout: float = 60 * 5.0
+  terminate_on_close: bool = True
+  httpx_client_factory: CheckableMcpHttpClientFactory = create_mcp_http_client
 
 
-@asynccontextmanager
-async def tracked_stdio_client(server, errlog, process=None):
-  """A wrapper around stdio_client that ensures proper process tracking and cleanup."""
-  our_process = process
+def retry_on_errors(func):
+  """Decorator to automatically retry action when MCP session errors occur.
 
-  # If no process was provided, create one
-  if our_process is None:
-    our_process = await asyncio.create_subprocess_exec(
-        server.command,
-        *server.args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=errlog,
-    )
+  When MCP session errors occur, the decorator will automatically retry the
+  action once. The create_session method will handle creating a new session
+  if the old one was disconnected.
 
-  # Use the original stdio_client, but ensure process cleanup
-  try:
-    async with stdio_client(server=server, errlog=errlog) as client:
-      yield client, our_process
-  finally:
-    # Ensure the process is properly terminated if it still exists
-    if our_process and our_process.returncode is None:
-      try:
-        logger.info(
-            f'Terminating process {our_process.pid} from tracked_stdio_client'
-        )
-        our_process.terminate()
-        try:
-          await asyncio.wait_for(our_process.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-          # Force kill if it doesn't terminate quickly
-          if our_process.returncode is None:
-            logger.warning(f'Forcing kill of process {our_process.pid}')
-            our_process.kill()
-      except ProcessLookupError:
-        # Process already gone, that's fine
-        logger.info(f'Process {our_process.pid} already terminated')
+  Cancellation is not retried and must be allowed to propagate. In async
+  runtimes, cancellation may surface as `asyncio.CancelledError` or as another
+  exception while the task is cancelling.
+
+  Args:
+      func: The function to decorate.
+
+  Returns:
+      The decorated function.
+  """
+
+  @functools.wraps(func)  # Preserves original function metadata
+  async def wrapper(self, *args, **kwargs):
+    try:
+      return await func(self, *args, **kwargs)
+    except Exception as e:
+      task = asyncio.current_task()
+      if task is not None:
+        cancelling = getattr(task, 'cancelling', None)
+        if cancelling is not None and cancelling() > 0:
+          raise
+      if _has_cancelled_error_context(e):
+        raise
+      # If an error is thrown, we will retry the function to reconnect to the
+      # server. create_session will handle detecting and replacing disconnected
+      # sessions.
+      logger.info('Retrying %s due to error: %s', func.__name__, e)
+      return await func(self, *args, **kwargs)
+
+  return wrapper
 
 
 class MCPSessionManager:
   """Manages MCP client sessions.
 
   This class provides methods for creating and initializing MCP client sessions,
-  handling different connection parameters (Stdio and SSE).
+  handling different connection parameters (Stdio and SSE) and supporting
+  session pooling based on authentication headers.
   """
 
   def __init__(
       self,
-      connection_params: StdioServerParameters | SseServerParams,
-      exit_stack: AsyncExitStack,
+      connection_params: Union[
+          StdioServerParameters,
+          StdioConnectionParams,
+          SseConnectionParams,
+          StreamableHTTPConnectionParams,
+      ],
       errlog: TextIO = sys.stderr,
+      *,
+      sampling_callback: Optional[SamplingFnT] = None,
+      sampling_capabilities: Optional[SamplingCapability] = None,
   ):
     """Initializes the MCP session manager.
 
-    Example usage:
-    ```
-    mcp_session_manager = MCPSessionManager(
-        connection_params=connection_params,
-        exit_stack=exit_stack,
-    )
-    session = await mcp_session_manager.create_session()
-    ```
-
     Args:
-        connection_params: Parameters for the MCP connection (Stdio or SSE).
-        exit_stack: AsyncExitStack to manage the session lifecycle.
+        connection_params: Parameters for the MCP connection (Stdio, SSE or
+          Streamable HTTP). Stdio by default also has a 5s read timeout as other
+          parameters but it's not configurable for now.
         errlog: (Optional) TextIO stream for error logging. Use only for
           initializing a local stdio MCP session.
+        sampling_callback: Optional callback to handle sampling requests from the
+          MCP server.
+        sampling_capabilities: Optional capabilities for sampling.
     """
-
-    self._connection_params = connection_params
-    self._exit_stack = exit_stack
-    self._errlog = errlog
-    self._process = None  # Track the subprocess
-    self._active_processes = set()  # Track all processes created
-    self._active_file_handles = set()  # Track file handles
-
-  async def create_session(
-      self,
-  ) -> tuple[ClientSession, Optional[asyncio.subprocess.Process]]:
-    """Creates a new MCP session and tracks the associated process."""
-    session, process = await self._initialize_session(
-        connection_params=self._connection_params,
-        exit_stack=self._exit_stack,
-        errlog=self._errlog,
-    )
-    self._process = process  # Store reference to process
-
-    # Track the process
-    if process:
-      self._active_processes.add(process)
-
-    return session, process
-
-  @classmethod
-  async def _initialize_session(
-      cls,
-      *,
-      connection_params: StdioServerParameters | SseServerParams,
-      exit_stack: AsyncExitStack,
-      errlog: TextIO = sys.stderr,
-  ) -> tuple[ClientSession, Optional[asyncio.subprocess.Process]]:
-    """Initializes an MCP client session.
-
-    Args:
-        connection_params: Parameters for the MCP connection (Stdio or SSE).
-        exit_stack: AsyncExitStack to manage the session lifecycle.
-        errlog: (Optional) TextIO stream for error logging. Use only for
-          initializing a local stdio MCP session.
-
-    Returns:
-        ClientSession: The initialized MCP client session.
-    """
-    process = None
+    self._sampling_callback = sampling_callback
+    self._sampling_capabilities = sampling_capabilities
 
     if isinstance(connection_params, StdioServerParameters):
-      # For stdio connections, we need to track the subprocess
-      client, process = await cls._create_stdio_client(
-          server=connection_params,
-          errlog=errlog,
-          exit_stack=exit_stack,
+      # So far timeout is not configurable. Given MCP is still evolving, we
+      # would expect stdio_client to evolve to accept timeout parameter like
+      # other client.
+      logger.warning(
+          'StdioServerParameters is not recommended. Please use'
+          ' StdioConnectionParams.'
       )
-    elif isinstance(connection_params, SseServerParams):
-      # For SSE connections, create the client without a subprocess
+      self._connection_params = StdioConnectionParams(
+          server_params=connection_params,
+          timeout=5,
+      )
+    else:
+      self._connection_params = connection_params
+    self._errlog = errlog
+
+    # Session pool: maps session keys to (session, exit_stack, loop) tuples
+    self._sessions: Dict[
+        str, tuple[ClientSession, AsyncExitStack, asyncio.AbstractEventLoop]
+    ] = {}
+
+    # Map of event loops to their respective locks to prevent race conditions
+    # across different event loops in session creation.
+    self._session_lock_map: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+    self._lock_map_lock = threading.Lock()
+
+  @property
+  def _session_lock(self) -> asyncio.Lock:
+    """Returns an asyncio.Lock bound to the current event loop."""
+    current_loop = asyncio.get_running_loop()
+    with self._lock_map_lock:
+      if current_loop not in self._session_lock_map:
+        self._session_lock_map[current_loop] = asyncio.Lock()
+      return self._session_lock_map[current_loop]
+
+  def _generate_session_key(
+      self, merged_headers: Optional[Dict[str, str]] = None
+  ) -> str:
+    """Generates a session key based on connection params and merged headers.
+
+    For StdioConnectionParams, returns a constant key since headers are not
+    supported. For SSE and StreamableHTTP connections, generates a key based
+    on the provided merged headers.
+
+    Args:
+        merged_headers: Already merged headers (base + additional).
+
+    Returns:
+        A unique session key string.
+    """
+    if isinstance(self._connection_params, StdioConnectionParams):
+      # For stdio connections, headers are not supported, so use constant key
+      return 'stdio_session'
+
+    # For SSE and StreamableHTTP connections, use merged headers
+    if merged_headers:
+      headers_json = json.dumps(merged_headers, sort_keys=True)
+      headers_hash = hashlib.md5(headers_json.encode()).hexdigest()
+      return f'session_{headers_hash}'
+    else:
+      return 'session_no_headers'
+
+  def _merge_headers(
+      self, additional_headers: Optional[Dict[str, str]] = None
+  ) -> Optional[Dict[str, str]]:
+    """Merges base connection headers with additional headers.
+
+    Args:
+        additional_headers: Optional headers to merge with connection headers.
+
+    Returns:
+        Merged headers dictionary, or None if no headers are provided.
+    """
+    if isinstance(self._connection_params, StdioConnectionParams) or isinstance(
+        self._connection_params, StdioServerParameters
+    ):
+      # Stdio connections don't support headers
+      return None
+
+    base_headers = {}
+    if (
+        hasattr(self._connection_params, 'headers')
+        and self._connection_params.headers
+    ):
+      base_headers = self._connection_params.headers.copy()
+
+    if additional_headers:
+      base_headers.update(additional_headers)
+
+    return base_headers
+
+  def _is_session_disconnected(self, session: ClientSession) -> bool:
+    """Checks if a session is disconnected or closed.
+
+    Args:
+        session: The ClientSession to check.
+
+    Returns:
+        True if the session is disconnected, False otherwise.
+    """
+    return session._read_stream._closed or session._write_stream._closed
+
+  async def _cleanup_session(
+      self,
+      session_key: str,
+      exit_stack: AsyncExitStack,
+      stored_loop: asyncio.AbstractEventLoop,
+  ):
+    """Cleans up a session, handling different event loops safely.
+
+    Args:
+        session_key: The session key to clean up.
+        exit_stack: The AsyncExitStack managing the session resources.
+        stored_loop: The event loop on which the session was created.
+    """
+    current_loop = asyncio.get_running_loop()
+    try:
+      if stored_loop is current_loop:
+        await exit_stack.aclose()
+      elif stored_loop.is_closed():
+        logger.warning(
+            f'Error cleaning up session {session_key}: original event loop'
+            ' is closed, resources may be leaked.'
+        )
+      else:
+        # The old loop is still running in another thread;
+        # schedule cleanup on it.
+        logger.info(
+            f'Scheduling cleanup of session {session_key} on its original'
+            ' event loop.'
+        )
+        future = asyncio.run_coroutine_threadsafe(
+            exit_stack.aclose(), stored_loop
+        )
+
+        # Attach a callback so errors don't go unnoticed
+        def cleanup_done(f: asyncio.Future):
+          try:
+            if f.exception():
+              logger.warning(
+                  f'Error cleaning up session {session_key} on original'
+                  f' loop: {f.exception()}'
+              )
+          except Exception as e:
+            logger.warning(
+                f'Failed to check cleanup status for {session_key}: {e}'
+            )
+
+        future.add_done_callback(cleanup_done)
+    except Exception as e:
+      logger.warning(
+          f'Error during session cleanup for {session_key}: {e}',
+          exc_info=True,
+      )
+    finally:
+      if session_key in self._sessions:
+        del self._sessions[session_key]
+
+  def _create_client(self, merged_headers: Optional[Dict[str, str]] = None):
+    """Creates an MCP client based on the connection parameters.
+
+    Args:
+        merged_headers: Optional headers to include in the connection.
+                       Only applicable for SSE and StreamableHTTP connections.
+
+    Returns:
+        The appropriate MCP client instance.
+
+    Raises:
+        ValueError: If the connection parameters are not supported.
+    """
+    if isinstance(self._connection_params, StdioConnectionParams):
+      client = stdio_client(
+          server=self._connection_params.server_params,
+          errlog=self._errlog,
+      )
+    elif isinstance(self._connection_params, SseConnectionParams):
       client = sse_client(
-          url=connection_params.url,
-          headers=connection_params.headers,
-          timeout=connection_params.timeout,
-          sse_read_timeout=connection_params.sse_read_timeout,
+          url=self._connection_params.url,
+          headers=merged_headers,
+          timeout=self._connection_params.timeout,
+          sse_read_timeout=self._connection_params.sse_read_timeout,
+          httpx_client_factory=self._connection_params.httpx_client_factory,
+      )
+    elif isinstance(self._connection_params, StreamableHTTPConnectionParams):
+      client = streamablehttp_client(
+          url=self._connection_params.url,
+          headers=merged_headers,
+          timeout=timedelta(seconds=self._connection_params.timeout),
+          sse_read_timeout=timedelta(
+              seconds=self._connection_params.sse_read_timeout
+          ),
+          terminate_on_close=self._connection_params.terminate_on_close,
+          httpx_client_factory=self._connection_params.httpx_client_factory,
       )
     else:
       raise ValueError(
           'Unable to initialize connection. Connection should be'
           ' StdioServerParameters or SseServerParams, but got'
-          f' {connection_params}'
+          f' {self._connection_params}'
       )
+    return client
 
-    # Create the session with the client
-    transports = await exit_stack.enter_async_context(client)
-    session = await exit_stack.enter_async_context(ClientSession(*transports))
-    await session.initialize()
+  async def create_session(
+      self, headers: Optional[Dict[str, str]] = None
+  ) -> ClientSession:
+    """Creates and initializes an MCP client session.
 
-    return session, process
+    This method will check if an existing session for the given headers
+    is still connected. If it's disconnected, it will be cleaned up and
+    a new session will be created.
 
-  @staticmethod
-  async def _create_stdio_client(
-      server: StdioServerParameters,
-      errlog: TextIO,
-      exit_stack: AsyncExitStack,
-  ) -> tuple[Any, asyncio.subprocess.Process]:
-    """Create stdio client and return both the client and process.
+    Args:
+        headers: Optional headers to include in the session. These will be
+                merged with any existing connection headers. Only applicable
+                for SSE and StreamableHTTP connections.
 
-    This implementation adapts to how the MCP stdio_client is created.
-    The actual implementation may need to be adjusted based on the MCP library
-    structure.
+    Returns:
+        ClientSession: The initialized MCP client session.
     """
-    # Create the subprocess directly so we can track it
-    process = await asyncio.create_subprocess_exec(
-        server.command,
-        *server.args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=errlog,
-    )
+    # Merge headers once at the beginning
+    merged_headers = self._merge_headers(headers)
 
-    # Create the stdio client using the MCP library
-    try:
-      # Method 1: Try using the existing process if stdio_client supports it
-      client = stdio_client(server=server, errlog=errlog, process=process)
-    except TypeError:
-      # Method 2: If the above doesn't work, let stdio_client create its own process
-      # and we'll need to terminate both processes later
-      logger.warning(
-          'Using stdio_client with its own process - may lead to duplicate'
-          ' processes'
+    # Generate session key using merged headers
+    session_key = self._generate_session_key(merged_headers)
+
+    # Use async lock to prevent race conditions
+    async with self._session_lock:
+      # Check if we have an existing session
+      if session_key in self._sessions:
+        session, exit_stack, stored_loop = self._sessions[session_key]
+
+        # Check if the existing session is still connected and bound to the current loop
+        current_loop = asyncio.get_running_loop()
+        if stored_loop is current_loop and not self._is_session_disconnected(
+            session
+        ):
+          # Session is still good, return it
+          return session
+        else:
+          # Session is disconnected or from a different loop, clean it up
+          logger.info(
+              'Cleaning up session (disconnected or different loop): %s',
+              session_key,
+          )
+          await self._cleanup_session(session_key, exit_stack, stored_loop)
+
+      # Create a new session (either first time or replacing disconnected one)
+      exit_stack = AsyncExitStack()
+      timeout_in_seconds = (
+          self._connection_params.timeout
+          if hasattr(self._connection_params, 'timeout')
+          else None
       )
-      client = stdio_client(server=server, errlog=errlog)
+      sse_read_timeout_in_seconds = (
+          self._connection_params.sse_read_timeout
+          if hasattr(self._connection_params, 'sse_read_timeout')
+          else None
+      )
 
-    return client, process
-
-  async def _emergency_cleanup(self):
-    """Perform emergency cleanup of resources when normal cleanup fails."""
-    logger.info('Performing emergency cleanup of MCPSessionManager resources')
-
-    # Clean up any tracked processes
-    for proc in list(self._active_processes):
       try:
-        if proc and proc.returncode is None:
-          logger.info(f'Emergency termination of process {proc.pid}')
-          proc.terminate()
+        client = self._create_client(merged_headers)
+        is_stdio = isinstance(self._connection_params, StdioConnectionParams)
+
+        session = await asyncio.wait_for(
+            exit_stack.enter_async_context(
+                SessionContext(
+                    client=client,
+                    timeout=timeout_in_seconds,
+                    sse_read_timeout=sse_read_timeout_in_seconds,
+                    is_stdio=is_stdio,
+                    sampling_callback=self._sampling_callback,
+                    sampling_capabilities=self._sampling_capabilities,
+                )
+            ),
+            timeout=timeout_in_seconds,
+        )
+
+        # Store session, exit stack, and loop in the pool
+        self._sessions[session_key] = (
+            session,
+            exit_stack,
+            asyncio.get_running_loop(),
+        )
+        logger.debug('Created new session: %s', session_key)
+        return session
+
+      except Exception as e:
+        # If session creation fails, clean up the exit stack
+        if exit_stack:
           try:
-            await asyncio.wait_for(proc.wait(), timeout=1.0)
-          except asyncio.TimeoutError:
-            logger.warning(f"Process {proc.pid} didn't terminate, forcing kill")
-            proc.kill()
-        self._active_processes.remove(proc)
-      except Exception as e:
-        logger.error(f'Error during process cleanup: {e}')
+            await exit_stack.aclose()
+          except Exception as exit_stack_error:
+            logger.warning(
+                'Error during session creation cleanup: %s', exit_stack_error
+            )
+        raise ConnectionError(f'Failed to create MCP session: {e}') from e
 
-    # Clean up any tracked file handles
-    for handle in list(self._active_file_handles):
-      try:
-        if not handle.closed:
-          logger.info('Closing file handle')
-          handle.close()
-        self._active_file_handles.remove(handle)
-      except Exception as e:
-        logger.error(f'Error closing file handle: {e}')
+  def __getstate__(self):
+    """Custom pickling to exclude non-picklable runtime objects."""
+    state = self.__dict__.copy()
+    # Remove unpicklable entries or those that shouldn't persist across pickle
+    state['_sessions'] = {}
+    state['_session_lock_map'] = {}
+
+    # Locks and file-like objects cannot be pickled
+    state.pop('_lock_map_lock', None)
+    state.pop('_errlog', None)
+
+    return state
+
+  def __setstate__(self, state):
+    """Custom unpickling to restore state."""
+    self.__dict__.update(state)
+    # Re-initialize members that were not pickled
+    self._sessions = {}
+    self._session_lock_map = {}
+    self._lock_map_lock = threading.Lock()
+    # If _errlog was removed during pickling, default to sys.stderr
+    if not hasattr(self, '_errlog') or self._errlog is None:
+      self._errlog = sys.stderr
+
+  async def close(self):
+    """Closes all sessions and cleans up resources."""
+    async with self._session_lock:
+      for session_key in list(self._sessions.keys()):
+        _, exit_stack, stored_loop = self._sessions[session_key]
+        await self._cleanup_session(session_key, exit_stack, stored_loop)
+
+
+SseServerParams = SseConnectionParams
+
+StreamableHTTPServerParams = StreamableHTTPConnectionParams

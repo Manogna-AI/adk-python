@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ import asyncio
 import os
 from pathlib import Path
 import sys
+
 from mcp.server.fastmcp import FastMCP
 
 # Create an MCP server with a name
@@ -42,6 +43,13 @@ def list_directory(dirpath: str) -> list:
 def get_cwd() -> str:
   """Return the current working directory."""
   return str(Path.cwd())
+
+
+# Add a prompt for accessing file systems
+@mcp.prompt(name="file_system_prompt")
+def file_system_prompt() -> str:
+  return f"""\
+Help the user access their file systems."""
 
 
 # Graceful shutdown handler

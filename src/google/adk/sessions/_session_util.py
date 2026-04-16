@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,33 +11,40 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Utility functions for session service."""
 
-import base64
-from typing import Any, Optional
+from __future__ import annotations
 
-from google.genai import types
+from typing import Any
+from typing import Optional
+from typing import Type
+from typing import TypeVar
 
+from .state import State
 
-def encode_content(content: types.Content):
-  """Encodes a content object to a JSON dictionary."""
-  encoded_content = content.model_dump(exclude_none=True)
-  for p in encoded_content["parts"]:
-    if "inline_data" in p:
-      p["inline_data"]["data"] = base64.b64encode(
-          p["inline_data"]["data"]
-      ).decode("utf-8")
-  return encoded_content
+M = TypeVar("M")
 
 
-def decode_content(
-    content: Optional[dict[str, Any]],
-) -> Optional[types.Content]:
-  """Decodes a content object from a JSON dictionary."""
-  if not content:
+def decode_model(
+    data: Optional[dict[str, Any]], model_cls: Type[M]
+) -> Optional[M]:
+  """Decodes a pydantic model object from a JSON dictionary."""
+  if data is None:
     return None
-  for p in content["parts"]:
-    if "inline_data" in p:
-      p["inline_data"]["data"] = base64.b64decode(p["inline_data"]["data"])
-  return types.Content.model_validate(content)
+  return model_cls.model_validate(data)
+
+
+def extract_state_delta(
+    state: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+  """Extracts app, user, and session state deltas from a state dictionary."""
+  deltas = {"app": {}, "user": {}, "session": {}}
+  if state:
+    for key in state.keys():
+      if key.startswith(State.APP_PREFIX):
+        deltas["app"][key.removeprefix(State.APP_PREFIX)] = state[key]
+      elif key.startswith(State.USER_PREFIX):
+        deltas["user"][key.removeprefix(State.USER_PREFIX)] = state[key]
+      elif not key.startswith(State.TEMP_PREFIX):
+        deltas["session"][key] = state[key]
+  return deltas

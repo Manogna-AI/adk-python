@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,21 +16,107 @@
 
 from __future__ import annotations
 
-import re
 from typing import AsyncGenerator
-from typing import Generator
 from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
 from ...agents.readonly_context import ReadonlyContext
 from ...events.event import Event
-from ...sessions.state import State
+from ...utils import instructions_utils
 from ._base_llm_processor import BaseLlmRequestProcessor
 
 if TYPE_CHECKING:
   from ...agents.invocation_context import InvocationContext
+  from ...agents.llm_agent import LlmAgent
   from ...models.llm_request import LlmRequest
+
+
+async def _process_agent_instruction(
+    agent: 'LlmAgent',
+    invocation_context: 'InvocationContext',
+) -> str:
+  """Process agent instruction with state injection.
+
+  Resolves the agent's instruction and injects session state variables
+  unless bypass_state_injection is set.
+
+  Args:
+    agent: The agent with instruction to process.
+    invocation_context: The invocation context.
+
+  Returns:
+    The processed instruction text with state variables injected.
+  """
+  raw_si, bypass_state_injection = await agent.canonical_instruction(
+      ReadonlyContext(invocation_context)
+  )
+  si = raw_si
+  if not bypass_state_injection:
+    si = await instructions_utils.inject_session_state(
+        raw_si, ReadonlyContext(invocation_context)
+    )
+  return si
+
+
+async def _build_instructions(
+    invocation_context: 'InvocationContext',
+    llm_request: 'LlmRequest',
+) -> None:
+  """Build and append instructions to the LLM request.
+
+  Handles global instructions (deprecated), static_instruction, and
+  dynamic instruction based on agent configuration.
+
+  Args:
+    invocation_context: The invocation context.
+    llm_request: The LlmRequest to populate with instructions.
+  """
+  from ...agents.base_agent import BaseAgent
+
+  agent = invocation_context.agent
+
+  root_agent: BaseAgent = agent.root_agent
+
+  # Handle global instructions (DEPRECATED - use GlobalInstructionPlugin instead)
+  # TODO: Remove this code block when global_instruction field is removed
+  if (
+      hasattr(root_agent, 'global_instruction')
+      and root_agent.global_instruction
+  ):
+    raw_si, bypass_state_injection = (
+        await root_agent.canonical_global_instruction(
+            ReadonlyContext(invocation_context)
+        )
+    )
+    si = raw_si
+    if not bypass_state_injection:
+      si = await instructions_utils.inject_session_state(
+          raw_si, ReadonlyContext(invocation_context)
+      )
+    llm_request.append_instructions([si])
+
+  # Handle static_instruction - add via append_instructions
+  if agent.static_instruction:
+    from google.genai import _transformers
+
+    # Convert ContentUnion to Content using genai transformer
+    static_content = _transformers.t_content(agent.static_instruction)
+    llm_request.append_instructions(static_content)
+
+  # Handle instruction based on whether static_instruction exists
+  if agent.instruction and not agent.static_instruction:
+    # Only add to system instructions if no static instruction exists
+    si = await _process_agent_instruction(agent, invocation_context)
+    llm_request.append_instructions([si])
+  elif agent.instruction and agent.static_instruction:
+    # Static instruction exists, so add dynamic instruction to content
+    from google.genai import types
+
+    si = await _process_agent_instruction(agent, invocation_context)
+    # Create user content for dynamic instruction
+    dynamic_content = types.Content(role='user', parts=[types.Part(text=si)])
+    llm_request.contents.append(dynamic_content)
 
 
 class _InstructionsLlmRequestProcessor(BaseLlmRequestProcessor):
@@ -40,117 +126,11 @@ class _InstructionsLlmRequestProcessor(BaseLlmRequestProcessor):
   async def run_async(
       self, invocation_context: InvocationContext, llm_request: LlmRequest
   ) -> AsyncGenerator[Event, None]:
-    from ...agents.base_agent import BaseAgent
-    from ...agents.llm_agent import LlmAgent
-
-    agent = invocation_context.agent
-    if not isinstance(agent, LlmAgent):
-      return
-
-    root_agent: BaseAgent = agent.root_agent
-
-    # Appends global instructions if set.
-    if (
-        isinstance(root_agent, LlmAgent) and root_agent.global_instruction
-    ):  # not empty str
-      raw_si, bypass_state_injection = (
-          await root_agent.canonical_global_instruction(
-              ReadonlyContext(invocation_context)
-          )
-      )
-      si = raw_si
-      if not bypass_state_injection:
-        si = await _populate_values(raw_si, invocation_context)
-      llm_request.append_instructions([si])
-
-    # Appends agent instructions if set.
-    if agent.instruction:  # not empty str
-      raw_si, bypass_state_injection = await agent.canonical_instruction(
-          ReadonlyContext(invocation_context)
-      )
-      si = raw_si
-      if not bypass_state_injection:
-        si = await _populate_values(raw_si, invocation_context)
-      llm_request.append_instructions([si])
+    await _build_instructions(invocation_context, llm_request)
 
     # Maintain async generator behavior
-    if False:  # Ensures it behaves as a generator
-      yield  # This is a no-op but maintains generator structure
+    return
+    yield  # This line ensures it behaves as a generator but is never reached
 
 
 request_processor = _InstructionsLlmRequestProcessor()
-
-
-async def _populate_values(
-    instruction_template: str,
-    context: InvocationContext,
-) -> str:
-  """Populates values in the instruction template, e.g. state, artifact, etc."""
-
-  async def _async_sub(pattern, repl_async_fn, string) -> str:
-    result = []
-    last_end = 0
-    for match in re.finditer(pattern, string):
-      result.append(string[last_end : match.start()])
-      replacement = await repl_async_fn(match)
-      result.append(replacement)
-      last_end = match.end()
-    result.append(string[last_end:])
-    return ''.join(result)
-
-  async def _replace_match(match) -> str:
-    var_name = match.group().lstrip('{').rstrip('}').strip()
-    optional = False
-    if var_name.endswith('?'):
-      optional = True
-      var_name = var_name.removesuffix('?')
-    if var_name.startswith('artifact.'):
-      var_name = var_name.removeprefix('artifact.')
-      if context.artifact_service is None:
-        raise ValueError('Artifact service is not initialized.')
-      artifact = await context.artifact_service.load_artifact(
-          app_name=context.session.app_name,
-          user_id=context.session.user_id,
-          session_id=context.session.id,
-          filename=var_name,
-      )
-      if not var_name:
-        raise KeyError(f'Artifact {var_name} not found.')
-      return str(artifact)
-    else:
-      if not _is_valid_state_name(var_name):
-        return match.group()
-      if var_name in context.session.state:
-        return str(context.session.state[var_name])
-      else:
-        if optional:
-          return ''
-        else:
-          raise KeyError(f'Context variable not found: `{var_name}`.')
-
-  return await _async_sub(r'{+[^{}]*}+', _replace_match, instruction_template)
-
-
-def _is_valid_state_name(var_name):
-  """Checks if the variable name is a valid state name.
-
-  Valid state is either:
-    - Valid identifier
-    - <Valid prefix>:<Valid identifier>
-  All the others will just return as it is.
-
-  Args:
-    var_name: The variable name to check.
-
-  Returns:
-    True if the variable name is a valid state name, False otherwise.
-  """
-  parts = var_name.split(':')
-  if len(parts) == 1:
-    return var_name.isidentifier()
-
-  if len(parts) == 2:
-    prefixes = [State.APP_PREFIX, State.USER_PREFIX, State.TEMP_PREFIX]
-    if (parts[0] + ':') in prefixes:
-      return parts[1].isidentifier()
-  return False

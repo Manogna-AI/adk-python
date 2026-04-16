@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from google.adk.agents import Agent
-from google.adk.tools import ToolContext
+from google.adk.agents.llm_agent import Agent
+from google.adk.tools.tool_context import ToolContext
 from google.genai.types import Part
 from pydantic import BaseModel
 
-from ... import utils
+from ... import testing_utils
 
 
 def test_output_schema():
@@ -27,7 +27,7 @@ def test_output_schema():
   response = [
       'response1',
   ]
-  mockModel = utils.MockModel.create(responses=response)
+  mockModel = testing_utils.MockModel.create(responses=response)
   root_agent = Agent(
       name='root_agent',
       model=mockModel,
@@ -36,11 +36,12 @@ def test_output_schema():
       disallow_transfer_to_peers=True,
   )
 
-  runner = utils.InMemoryRunner(root_agent)
+  runner = testing_utils.InMemoryRunner(root_agent)
 
-  assert utils.simplify_events(runner.run('test1')) == [
+  assert testing_utils.simplify_events(runner.run('test1')) == [
       ('root_agent', 'response1'),
   ]
   assert len(mockModel.requests) == 1
   assert mockModel.requests[0].config.response_schema == CustomOutput
   assert mockModel.requests[0].config.response_mime_type == 'application/json'
+  assert mockModel.requests[0].config.labels == {'adk_agent_name': 'root_agent'}

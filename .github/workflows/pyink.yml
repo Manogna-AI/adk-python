@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,7 @@ name: Check Pyink Formatting
 on:
   pull_request:
     paths:
-      - 'src/**/*.py'
-      - 'tests/**/*.py'
+      - '**.py'
       - 'pyproject.toml'
 
 jobs:
@@ -27,47 +26,44 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Install pyink
         run: |
           pip install pyink
 
-      - name: Detect changed Python files
-        id: detect_changes
-        run: |
-          git fetch origin ${{ github.base_ref }}
-          CHANGED_FILES=$(git diff --diff-filter=ACMR --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.py$' || true)
-          echo "CHANGED_FILES=${CHANGED_FILES}" >> $GITHUB_ENV
-
       - name: Run pyink on changed files
-        if: env.CHANGED_FILES != ''
+        id: run_pyink
         run: |
-          echo "Changed Python files:"
-          echo "$CHANGED_FILES"
+          git fetch origin ${GITHUB_BASE_REF}
+          CHANGED_FILES=$(git diff --diff-filter=ACMR --name-only origin/${GITHUB_BASE_REF}...HEAD | grep -E '\.py$' || true)
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "Changed Python files:"
+            echo "$CHANGED_FILES"
+            echo ""
+            FORMATTED_FILES=$(echo "$CHANGED_FILES" | tr '\n' ' ')
 
-          # Run pyink --check
-          set +e
-          pyink --check --config pyproject.toml $CHANGED_FILES
-          RESULT=$?
-          set -e
-
-          if [ $RESULT -ne 0 ]; then
-            echo ""
-            echo "❌ Pyink formatting check failed!"
-            echo "👉 To fix formatting, run locally:"
-            echo ""
-            echo "    pyink --config pyproject.toml $CHANGED_FILES"
-            echo ""
-            exit $RESULT
+            # Run pyink --check
+            set +e
+            pyink --check --diff --config pyproject.toml $CHANGED_FILES
+            RESULT=$?
+            set -e
+            if [ $RESULT -ne 0 ]; then
+              echo ""
+              echo "❌ Pyink formatting check failed!"
+              echo "👉 To fix formatting, run locally:"
+              echo ""
+              echo "    pyink --config pyproject.toml $FORMATTED_FILES"
+              echo ""
+              exit $RESULT
+            fi
+          else
+            echo "No Python files changed. Skipping pyink check."
           fi
-
-      - name: No changed Python files detected
-        if: env.CHANGED_FILES == ''
-        run: |
-          echo "No Python files changed. Skipping pyink check."

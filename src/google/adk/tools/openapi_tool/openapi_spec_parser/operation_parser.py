@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,18 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import inspect
 from textwrap import dedent
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.models import Operation
 from fastapi.openapi.models import Parameter
 from fastapi.openapi.models import Schema
 
+from ..._gemini_schema_util import _to_snake_case
 from ..common.common import ApiParameter
 from ..common.common import PydocHelper
-from ..common.common import to_snake_case
+from ..common.common import rename_python_keywords
 
 
 class OperationParser:
@@ -36,13 +43,21 @@ class OperationParser:
   """
 
   def __init__(
-      self, operation: Union[Operation, Dict[str, Any], str], should_parse=True
+      self,
+      operation: Union[Operation, Dict[str, Any], str],
+      should_parse: bool = True,
+      *,
+      preserve_property_names: bool = False,
   ):
     """Initializes the OperationParser with an OpenApiOperation.
 
     Args:
         operation: The OpenApiOperation object or a dictionary to process.
         should_parse: Whether to parse the operation during initialization.
+        preserve_property_names: If True, preserve the original property names
+          from the OpenAPI spec instead of converting them to snake_case.
+          Useful for APIs that expect camelCase or other non-snake_case
+          parameter names.
     """
     if isinstance(operation, dict):
       self._operation = Operation.model_validate(operation)
@@ -51,6 +66,7 @@ class OperationParser:
     else:
       self._operation = operation
 
+    self._preserve_property_names = preserve_property_names
     self._params: List[ApiParameter] = []
     self._return_value: Optional[ApiParameter] = None
     if should_parse:
@@ -65,11 +81,23 @@ class OperationParser:
       operation: Union[Operation, Dict[str, Any]],
       params: List[ApiParameter],
       return_value: Optional[ApiParameter] = None,
+      *,
+      preserve_property_names: bool = False,
   ) -> 'OperationParser':
-    parser = cls(operation, should_parse=False)
+    parser = cls(
+        operation,
+        should_parse=False,
+        preserve_property_names=preserve_property_names,
+    )
     parser._params = params
     parser._return_value = return_value
     return parser
+
+  def _get_py_name(self, original_name: str) -> str:
+    """Determines the Python parameter name based on preserve_property_names."""
+    if self._preserve_property_names:
+      return rename_python_keywords(original_name)
+    return ''
 
   def _process_operation_parameters(self):
     """Processes parameters from the OpenAPI operation."""
@@ -93,6 +121,7 @@ class OperationParser:
                 param_schema=schema,
                 description=description,
                 required=required,
+                py_name=self._get_py_name(original_name),
             )
         )
 
@@ -120,6 +149,7 @@ class OperationParser:
                   param_location='body',
                   param_schema=prop_details,
                   description=prop_details.description,
+                  py_name=self._get_py_name(prop_name),
               )
           )
 
@@ -133,10 +163,19 @@ class OperationParser:
             )
         )
       else:
+        # Prefer explicit body name to avoid empty keys when schema lacks type
+        # information (e.g., oneOf/anyOf/allOf) while retaining legacy behavior
+        # for simple scalar types.
+        if schema and (schema.oneOf or schema.anyOf or schema.allOf):
+          param_name = 'body'
+        elif not schema or not schema.type:
+          param_name = 'body'
+        else:
+          param_name = ''
+
         self._params.append(
-            # Empty name for unnamed body param
             ApiParameter(
-                original_name='',
+                original_name=param_name,
                 param_location='body',
                 param_schema=schema,
                 description=description,
@@ -158,8 +197,8 @@ class OperationParser:
   def _process_return_value(self) -> Parameter:
     """Returns a Parameter object representing the return type."""
     responses = self._operation.responses or {}
-    # Default to Any if no 2xx response or if schema is missing
-    return_schema = Schema(type='Any')
+    # Default to empty schema if no 2xx response or if schema is missing
+    return_schema = Schema()
 
     # Take the 20x response with the smallest response code.
     valid_codes = list(
@@ -185,7 +224,7 @@ class OperationParser:
     operation_id = self._operation.operationId
     if not operation_id:
       raise ValueError('Operation ID is missing')
-    return to_snake_case(operation_id)[:60]
+    return _to_snake_case(operation_id)[:60]
 
   def get_return_type_hint(self) -> str:
     """Returns the return type hint string (like 'str', 'int', etc.)."""
