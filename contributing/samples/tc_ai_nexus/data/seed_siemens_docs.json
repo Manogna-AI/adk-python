@@ -1,0 +1,50 @@
+[
+  {
+    "doc_id": "TC-ARCH-001",
+    "role": "server_side_developer",
+    "source": "Teamcenter ITK Dev Guide",
+    "content": "When extending workflow handlers in Teamcenter ITK, validate dataset ownership and access rights before invoking AE_save_dataset to avoid transient deadlocks under high parallel job volume."
+  },
+  {
+    "doc_id": "TC-BMIDE-002",
+    "role": "bmide_modeler",
+    "source": "Teamcenter BMIDE Modeling Notes",
+    "content": "Property constant updates in BMIDE require regeneration and template deployment to all pools; skip-level migration can leave stale LOV references unless model cache is explicitly refreshed."
+  },
+  {
+    "doc_id": "TC-UI-003",
+    "role": "ui_engineer",
+    "source": "Active Workspace Config Handbook",
+    "content": "For Active Workspace command panel customization, align declarative view model conditions with object type hierarchy to prevent invisible actions caused by mismatched condition context."
+  },
+  {
+    "doc_id": "TC-DB-004",
+    "role": "database_analyst",
+    "source": "Operational DBA Runbook",
+    "content": "Slow query spikes in Teamcenter often correlate with missing statistics on POM_APPLICATION_OBJECT and stale execution plans after bulk import; trigger incremental stats and capture AWR snapshot deltas."
+  },
+  {
+    "doc_id": "TC-DEVOPS-005",
+    "role": "devops_engineer",
+    "source": "PLM DevOps Playbook",
+    "content": "Blue-green deployment for Teamcenter web tier should pin session affinity during cutover and verify tcserver health endpoints before switching ingress to avoid partial login loops."
+  },
+  {
+    "doc_id": "TC-PROD-006",
+    "role": "production_support",
+    "source": "L3 Support Incident Catalog",
+    "content": "For recurring FMS ticket upload failures, compare FSC/FCC version matrix and inspect cache write permissions; mixed patch levels frequently manifest as intermittent transfer timeout errors."
+  },
+  {
+    "doc_id": "TC-MCP-007",
+    "role": "platform_architect",
+    "source": "Enterprise MCP Integration Blueprint",
+    "content": "MCP servers should expose read-first tools for repository, log, and SQL diagnostics, with write-capable tools gated by explicit human approval and auditable command traces."
+  },
+  {
+    "doc_id": "TC-SEC-008",
+    "role": "all_roles",
+    "source": "Enterprise Security Baseline",
+    "content": "Never execute destructive remediation directly from AI suggestions; produce a change plan, validate against non-production evidence, and obtain CAB approval before production execution."
+  }
+]

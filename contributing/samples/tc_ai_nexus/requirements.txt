@@ -1,0 +1,7 @@
+google-adk
+litellm
+gradio
+langchain
+langgraph
+pydantic
+python-dotenv
