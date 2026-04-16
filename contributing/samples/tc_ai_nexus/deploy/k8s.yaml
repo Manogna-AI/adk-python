@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tc-ai-nexus
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tc-ai-nexus
+  template:
+    metadata:
+      labels:
+        app: tc-ai-nexus
+    spec:
+      containers:
+        - name: tc-ai-nexus
+          image: ghcr.io/your-org/tc-ai-nexus:latest
+          ports:
+            - containerPort: 7860
+          env:
+            - name: TC_AI_MODEL
+              value: openai/gpt-5.3
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tc-ai-nexus-secrets
+                  key: openai-api-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tc-ai-nexus
+spec:
+  type: ClusterIP
+  selector:
+    app: tc-ai-nexus
+  ports:
+    - port: 80
+      targetPort: 7860
